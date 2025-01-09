@@ -1,25 +1,58 @@
+using System.Collections;
 using System.Collections.Generic;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
 using UnityEngine;
 
+public enum ChunkState
+{
+    Unloaded,          // The chunk is not loaded
+    WaitingToLoad,     // The chunk is scheduled to be loaded
+    Loaded,            // The chunk is fully loaded
+    WaitingToUnload    // The chunk is scheduled to be unloaded
+}
 public class Chunk
 {
     public Vector2Int position;    // Chunk's grid position
     public NativeArray<Tile> tiles; // Flattened array
-    //public Tile[,] tiles;          // 2D array of tiles in the chunk
     public Mesh mesh;              // Combined mesh for the chunk
     public bool isDirty = false;   // Indicates if the chunk needs updating
+    public GameObject chunkObjectRef; // stores a reference
+    public ChunkState state;
 
-    public GameObject chunkObjectRef; //store reference
+    //temp arrays for job processing
+    public NativeArray<Vector3> Vertices;
+    public NativeArray<int> Triangles;
+    public NativeArray<Vector2> UVs;
 
     public Chunk(int chunkSize)
     {
-        //tiles = new Tile[chunkSize, chunkSize];
+        state = ChunkState.Unloaded;
         tiles = new NativeArray<Tile>(chunkSize * chunkSize, Allocator.Persistent);
+    }
+
+    public void InitTempArrays(int chunkSize)
+    {
+        Vertices = new NativeArray<Vector3>(chunkSize * chunkSize * 4, Allocator.Persistent);
+        Triangles = new NativeArray<int>(chunkSize * chunkSize * 6, Allocator.Persistent);
+        UVs = new NativeArray<Vector2>(chunkSize * chunkSize * 4, Allocator.Persistent);
+    }
+
+    public void DisposeTempArrays()
+    {
+        if (Vertices.IsCreated) Vertices.Dispose();
+        if (Triangles.IsCreated) Triangles.Dispose();
+        if (UVs.IsCreated) UVs.Dispose();
+    }
+
+    public void DisposePermArrays()
+    {
+        if (tiles.IsCreated) tiles.Dispose();
     }
 }
 
-//value is index in tile atlas; left to right and bottom to top
+//value corresponds to an index in tile atlas; left to right and bottom to top
 public enum TileType
 {
     DIRT = 56,
@@ -39,6 +72,7 @@ public struct Tile
 //TODO: make water look pretty
 //TODO: Add tile edge blending
 //TODO: fix edges (can see adjacent tile edge)
+//TODO: use the worldseed
 public class ChunkingSystem : MonoBehaviour
 {
     public int chunkSize = 16;     // Size of each chunk (16x16 tiles)
@@ -46,16 +80,17 @@ public class ChunkingSystem : MonoBehaviour
     public float colliderHeight = 0.1f;
     public float noiseScale = 0.1f;
     public UnityEngine.Material tileMaterial; // Material for rendering the tiles
-    
-    public int TileAtlasDimension = 8;
-    private float TileOffset = 0.125f;
-    private Vector2[] uvOffsets;
+    public int tileAtlasDimension = 8;
+    public float tileSize = 1.0f;
+
+    private float tileOffset = 0.125f;
+    private NativeArray<Vector2> uvOffsets;
+    NativeArray<JobHandle> handles;
 
     private Transform cameraTransform; // Reference to the camera
     private Dictionary<Vector2Int, Chunk> activeChunks = new Dictionary<Vector2Int, Chunk>();
 
     private Vector2Int lastCameraChunk = Vector2Int.zero;
-    //TODO: use the worldseed
     private int worldSeed = -1;
 
     void Start()
@@ -63,7 +98,7 @@ public class ChunkingSystem : MonoBehaviour
         worldSeed = WorldManager.Instance.GetWorldSeed();
         cameraTransform = Camera.main.transform;
         tileMaterial.enableInstancing = true;
-        TileOffset = 1.0f / TileAtlasDimension;
+        tileOffset = 1.0f / tileAtlasDimension;
 
         PreComputeUVOffsets();
         UpdateChunks(); // Initial load
@@ -77,6 +112,19 @@ public class ChunkingSystem : MonoBehaviour
             lastCameraChunk = currentCameraChunk;
             UpdateChunks();
         }
+    }
+
+    private void OnDestroy()
+    {
+        foreach (var chunk in activeChunks.Values)
+        {
+            chunk.DisposeTempArrays();
+            chunk.DisposePermArrays();
+        }
+        activeChunks.Clear();
+
+        if (uvOffsets.IsCreated) uvOffsets.Dispose();
+        if (handles.IsCreated) handles.Dispose();
     }
 
     void UpdateChunks()
@@ -93,13 +141,10 @@ public class ChunkingSystem : MonoBehaviour
             {
                 Vector2Int chunkCoord = new Vector2Int(cameraChunk.x + x, cameraChunk.y + y);
                 chunksToKeep.Add(chunkCoord);
-
-                if (!activeChunks.ContainsKey(chunkCoord))
-                {
-                    LoadChunk(chunkCoord);
-                }
             }
         }
+
+        LoadChunksAsync(chunksToKeep);
 
         // Unload distant chunks
         List<Vector2Int> chunksToRemove = new List<Vector2Int>();
@@ -117,171 +162,156 @@ public class ChunkingSystem : MonoBehaviour
         }
     }
 
-    private void LoadChunk(Vector2Int chunkCoord)
+    void LoadChunksAsync(HashSet<Vector2Int> chunksToLoad)
     {
-        Chunk chunk = new Chunk(chunkSize);
-        InitChunkData(chunk, chunkCoord);
+        handles = new NativeArray<JobHandle>(chunksToLoad.Count, Allocator.Temp);
+        int index = 0;
+        foreach (var chunkCoord in chunksToLoad)
+        {
+            // Skip chunks that are already loaded or waiting to be unloaded
+            if (activeChunks.TryGetValue(chunkCoord, out Chunk existingChunk))
+            {
+                if (existingChunk.state == ChunkState.Loaded || existingChunk.state == ChunkState.WaitingToUnload)
+                {
+                    continue;
+                }
+            }
+
+            // Schedule the chunk for loading
+            if (!activeChunks.ContainsKey(chunkCoord))
+            {
+                Chunk newChunk = new Chunk(chunkSize)
+                {
+                    state = ChunkState.WaitingToLoad
+                };
+                activeChunks[chunkCoord] = newChunk;
+
+            }
+            handles[index++] = ScheduleChunkJob(chunkCoord, activeChunks[chunkCoord]);
+        }
+
+        JobHandle combinedHandle = JobHandle.CombineDependencies(handles);
+        combinedHandle.Complete(); // Wait for all jobs to finish
+        handles.Dispose();
+
+        // Finalize all chunks
+        foreach (var chunkCoord in chunksToLoad)
+        {
+            if (activeChunks.TryGetValue(chunkCoord, out Chunk chunk) && chunk.state == ChunkState.WaitingToLoad)
+            {
+                FinalizeChunkMesh(chunkCoord, chunk);
+                chunk.state = ChunkState.Loaded;
+            }
+        }
+    }
+
+    private JobHandle ScheduleChunkJob(Vector2Int chunkCoord, Chunk chunk)
+    {
+        // Allocate NativeArrays for mesh data
+        chunk.InitTempArrays(chunkSize);
+
+        // Schedule Noise Job
+        var noiseJob = new GenerateChunkTilesJob
+        {
+            tiles = chunk.tiles,
+            chunkSize = chunkSize,
+            noiseScale = noiseScale,
+            worldOffsetX = chunkCoord.x * chunkSize,
+            worldOffsetY = chunkCoord.y * chunkSize
+        };
+        JobHandle noiseHandle = noiseJob.Schedule(chunkSize * chunkSize, 64);
+
+        // Schedule Mesh Job
+        var meshJob = new MeshJob
+        {
+            vertices = chunk.Vertices,
+            triangles = chunk.Triangles,
+            uvs = chunk.UVs,
+            uvOffsets = uvOffsets,
+            tiles = chunk.tiles,
+            chunkSize = chunkSize,
+            tileSize = tileSize,
+            tileOffset = tileOffset
+        };
+        JobHandle meshHandle = meshJob.Schedule(noiseHandle);
+
+        return meshHandle;
+    }
+
+    private void FinalizeChunkMesh(Vector2Int chunkCoord, Chunk chunk)
+    {
+        // Create the mesh
+        Mesh mesh = new Mesh
+        {
+            vertices = chunk.Vertices.ToArray(),
+            triangles = chunk.Triangles.ToArray(),
+            uv = chunk.UVs.ToArray()
+        };
+        chunk.DisposeTempArrays();
+        mesh.RecalculateNormals();
 
         // Create the chunk GameObject
         GameObject chunkObject = new GameObject($"Chunk {chunkCoord}");
+        chunk.chunkObjectRef = chunkObject;
         chunkObject.transform.position = ChunkToWorld(chunkCoord);
 
-        //save reference
-        chunk.chunkObjectRef = chunkObject;
+        // Set the chunk as a child of the parent GameObject
+        chunkObject.transform.SetParent(this.transform);
 
-        // Assign the Terrain layer
-        chunkObject.layer = LayerMask.NameToLayer("Terrain");
-
-        // Add MeshRenderer and MeshFilter
-        MeshRenderer renderer = chunkObject.AddComponent<MeshRenderer>();
+        // Assign mesh to GameObject
         MeshFilter filter = chunkObject.AddComponent<MeshFilter>();
-
-        // Generate the chunk mesh
-        filter.mesh = CreateChunkMesh(chunk, 1f); // Tile size = 1 unit
+        MeshRenderer renderer = chunkObject.AddComponent<MeshRenderer>();
         renderer.material = tileMaterial;
+        filter.mesh = mesh;
 
-        // Add a BoxCollider to the chunk
-        UnityEngine.BoxCollider collider = chunkObject.AddComponent<UnityEngine.BoxCollider>();
-        collider.center = new Vector3(chunkSize / 2, 0, chunkSize / 2); // Center at the chunk
-        collider.size = new Vector3(chunkSize, colliderHeight, chunkSize); // Match chunk dimensions
-
-        activeChunks[chunkCoord] = chunk;
+        // Add BoxCollider
+        BoxCollider collider = chunkObject.AddComponent<BoxCollider>();
+        collider.center = new Vector3(chunkSize / 2, 0, chunkSize / 2);
+        collider.size = new Vector3(chunkSize, colliderHeight, chunkSize);
     }
 
     private void UnloadChunk(Vector2Int chunkCoord)
     {
         if (activeChunks.TryGetValue(chunkCoord, out Chunk chunk))
         {
-            if (chunk.chunkObjectRef != null)
+            if (chunk.state == ChunkState.WaitingToLoad)
             {
-                if (chunk.tiles.IsCreated)
-                {
-                    chunk.tiles.Dispose();
-                }
-                Destroy(chunk.chunkObjectRef);
+                // Cancel loading and mark as unloaded
+                chunk.DisposeTempArrays();
+                chunk.DisposePermArrays();
+                activeChunks.Remove(chunkCoord);
+                return;
             }
 
-            activeChunks.Remove(chunkCoord);
+            if (chunk.state == ChunkState.Loaded)
+            {
+                // Mark chunk as waiting to unload
+                chunk.state = ChunkState.WaitingToUnload;
+
+                if (chunk.chunkObjectRef != null)
+                {
+                    chunk.DisposeTempArrays();
+                    chunk.DisposePermArrays();
+                    Destroy(chunk.chunkObjectRef);
+                }
+
+                activeChunks.Remove(chunkCoord);
+            }
         }
         else
         {
-            Debug.LogWarning($"Failed to unload chunk at {chunkCoord}");
+            Debug.LogWarning($"Attempted to unload a chunk that does not exist at {chunkCoord}");
         }
-    }
-
-    private void InitChunkData(Chunk chunk, Vector2Int chunkCoord)
-    {
-        // Create chunk data
-        chunk.position = chunkCoord;
-
-        // Generate random tile data for this example
-        int index = 0;
-        for (int x = 0; x < chunkSize; x++)
-        {
-            for (int y = 0; y < chunkSize; y++)
-            {
-                float noiseValue = Mathf.PerlinNoise(x * noiseScale, y * noiseScale) +
-                   0.5f * Mathf.PerlinNoise(x * noiseScale * 2, y * noiseScale * 2);
-
-                TileType tileType;
-                bool walkable;
-                if (noiseValue < 0.3f)
-                {
-                    tileType = TileType.WATER;
-                    walkable = false;
-                }
-                else if (noiseValue < 0.5f)
-                {
-                    tileType = TileType.DIRT;
-                    walkable = true;
-                }
-                else if (noiseValue < 0.8f)
-                {
-                    tileType = TileType.GRASS;
-                    walkable = true;
-                }
-                else
-                {
-                    tileType = TileType.STONE;
-                    walkable = true;
-                }
-
-                chunk.tiles[index++] = new Tile()
-                {
-                    type = tileType,
-                    isWalkable = walkable
-                };
-            }
-        }
-    }
-
-    private Mesh CreateChunkMesh(Chunk chunk, float tileSize)
-    {
-        Mesh mesh = new Mesh();
-
-        List<Vector3> vertices = new List<Vector3>();
-        List<int> triangles = new List<int>();
-        List<Vector2> uv = new List<Vector2>();
-
-        int vertexIndex = 0;
-
-        int index = 0;
-        for (int x = 0; x < chunkSize; x++)
-        {
-            for (int y = 0; y < chunkSize; y++)
-            {
-                // Tile world position
-                float worldX = x * tileSize;
-                float worldY = y * tileSize;
-
-                // Add quad vertices
-                vertices.Add(new Vector3(worldX, 0, worldY));               // Bottom-left
-                vertices.Add(new Vector3(worldX + tileSize, 0, worldY));    // Bottom-right
-                vertices.Add(new Vector3(worldX + tileSize, 0, worldY + tileSize)); // Top-right
-                vertices.Add(new Vector3(worldX, 0, worldY + tileSize));    // Top-left
-
-                // Add triangles
-                triangles.Add(vertexIndex + 0);
-                triangles.Add(vertexIndex + 2);
-                triangles.Add(vertexIndex + 1);
-                triangles.Add(vertexIndex + 0);
-                triangles.Add(vertexIndex + 3);
-                triangles.Add(vertexIndex + 2);
-
-                // Calculate UV coordinates for the tile
-                int textureIndex = (int)chunk.tiles[index].type;
-                Vector2 uvOffset = GetUVOffset(textureIndex);
-                uv.Add(uvOffset + new Vector2(0, 0)); // Bottom-left
-                uv.Add(uvOffset + new Vector2(TileOffset, 0)); // Bottom-right
-                uv.Add(uvOffset + new Vector2(TileOffset, TileOffset)); // Top-right
-                uv.Add(uvOffset + new Vector2(0, TileOffset)); // Top-left
-
-                vertexIndex += 4;
-                ++index;
-            }
-        }
-
-        mesh.vertices = vertices.ToArray();
-        mesh.triangles = triangles.ToArray();
-        mesh.uv = uv.ToArray();
-        mesh.RecalculateNormals();
-
-        return mesh;
-    }
-
-    private Vector2 GetUVOffset(int textureIndex)
-    {
-        return uvOffsets[textureIndex];
     }
 
     private void PreComputeUVOffsets()
     {
-        uvOffsets = new Vector2[TileAtlasDimension * TileAtlasDimension];
+        uvOffsets = new NativeArray<Vector2>(tileAtlasDimension * tileAtlasDimension, Allocator.Persistent);
         for (int i = 0; i < uvOffsets.Length; i++)
         {
-            int x = i % TileAtlasDimension;
-            int y = i / TileAtlasDimension;
-            uvOffsets[i] = new Vector2(x * TileOffset, y * TileOffset);
+            int x = i % tileAtlasDimension;
+            int y = i / tileAtlasDimension;
+            uvOffsets[i] = new Vector2(x * tileOffset, y * tileOffset);
         }
     }
 
@@ -297,3 +327,4 @@ public class ChunkingSystem : MonoBehaviour
         return new Vector3(chunkCoord.x * chunkSize, 0, chunkCoord.y * chunkSize);
     }
 }
+    
