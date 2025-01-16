@@ -120,6 +120,7 @@ public class ChunkingSystem : MonoBehaviour
         cameraTransform = Camera.main.transform;
         tileMaterial.enableInstancing = true;
         tileOffset = 1.0f / tileAtlasDimension;
+        SetupECSConfigData();
 
         PreComputeUVOffsets();
         UpdateChunks(); // Initial load
@@ -147,6 +148,29 @@ public class ChunkingSystem : MonoBehaviour
         activeChunks.Clear();
 
         if (uvOffsets.IsCreated) uvOffsets.Dispose();
+    }
+
+    //only call this once
+    private void SetupECSConfigData()
+    {
+        // 2) Retrieve the singleton entity:
+        EntityQuery query = entityManager.CreateEntityQuery(typeof(PathfindingConfigSingleton));
+        if (!query.IsEmpty)
+        {
+            Entity singletonEntity = query.GetSingletonEntity();
+            PathfindingConfigSingleton config = entityManager.GetComponentData<PathfindingConfigSingleton>(singletonEntity);
+            config.ChunkSize = chunkSize;
+            entityManager.SetComponentData(singletonEntity, config);
+        }
+        else
+        {
+            Entity singletonEntity = entityManager.CreateEntity();
+            entityManager.AddComponentData(singletonEntity, new PathfindingConfigSingleton
+            {
+                ChunkSize = chunkSize
+            });
+            entityManager.SetName(singletonEntity, "GameStateSingleton");
+        }
     }
 
     void UpdateChunks()

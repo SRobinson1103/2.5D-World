@@ -12,13 +12,17 @@ using UnityEngine;
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 public partial class PathfindingSystem : SystemBase
 {
+    //allows ecb to modify entities within the job
+    EndSimulationEntityCommandBufferSystem endSimEcbSystem;
+
     protected override void OnCreate()
     {
         base.OnCreate();
 
+        endSimEcbSystem = World.GetOrCreateSystemManaged<EndSimulationEntityCommandBufferSystem>();
         // For simplicity, we spawn entities on system creation
         // In a real game, you can trigger this with an event
-        RequireForUpdate(GetEntityQuery(typeof(PathfindingActiveTag)));
+        RequireForUpdate(GetEntityQuery(typeof(PathfindingRequestActiveTag)));
     }
 
     protected override void OnUpdate()
@@ -34,26 +38,39 @@ public partial class PathfindingSystem : SystemBase
         //create a map of chunk coordinates to active chunks - readonly
         NativeHashMap<int2, DynamicBuffer<TileBufferElement>> combinedTileBuffers = GetCombinedTileBuffers(chunkEntities, tileBufferLookup);
 
+        //This is needed to allow parallel writing by the ecb
+        var ecb = endSimEcbSystem.CreateCommandBuffer().AsParallelWriter();
+
+        //get the pathfinding config singleton
+        if (!SystemAPI.HasSingleton<PathfindingConfigSingleton>())
+            return;
+        PathfindingConfigSingleton config = SystemAPI.GetSingleton<PathfindingConfigSingleton>();
+
         // Iterate through pathfinding requests
         Entities
         .WithBurst()
-        .WithAll<PathfindingActiveTag>() // only process active requests, Redundant with RequireForUpdate in OnCreate?
+        .WithAll<PathfindingRequestActiveTag>() // only process active requests, Redundant with RequireForUpdate in OnCreate?
         .WithNativeDisableContainerSafetyRestriction(combinedTileBuffers) //disable safety checks - this intended to be readonly
         .WithNativeDisableParallelForRestriction(pathResultBufferLookup) //allow writing
-        .ForEach((Entity entity, ref PathfindingConfig config, ref PathfindingRequest request, ref PathfindingResult result) =>
+        .ForEach((Entity entity, int entityInQueryIndex, ref PathfindingRequest request, ref PathfindingResult result) =>
         {
+            Debug.Log($"PathfindingSystem : pathfinding request was issued.");
             int2 startChunkCoord = (int2) (request.GlobalStartPosition / config.ChunkSize);
             int2 targetChunkCoord = (int2) (request.GlobalTargetPosition / config.ChunkSize);
 
             if(!combinedTileBuffers.ContainsKey(startChunkCoord) || !combinedTileBuffers.ContainsKey(targetChunkCoord))
-                Debug.Log($"Combined chunk dynamicbuffers hashmap doesnt contain chunk with one of these coordinates: {startChunkCoord} or {targetChunkCoord}.");
+                Debug.Log($"PathfindingSystem : Combined chunk dynamicbuffers hashmap doesnt contain chunk with one of these coordinates: {startChunkCoord} or {targetChunkCoord}.");
 
             if(!pathResultBufferLookup.HasBuffer(entity))
-                Debug.Log($"Entity does not contain pathfiniding results buffer");
+                Debug.Log($"PathfindingSystem : Entity does not contain pathfiniding results buffer");
 
             DynamicBuffer<PathPointBufferElement> pathResultBuffer = pathResultBufferLookup[entity];
-            PerformAStarPathfinding(startChunkCoord, config, request, combinedTileBuffers, ref result, pathResultBuffer);                
+            PerformAStarPathfinding(startChunkCoord, config, request, combinedTileBuffers, ref result, pathResultBuffer);
+
+            ecb.RemoveComponent<PathfindingRequestActiveTag>(entityInQueryIndex, entity); // the pathfinding request was complete, remove this tag
          }).ScheduleParallel();
+
+        endSimEcbSystem.AddJobHandleForProducer(Dependency);
 
         Dependency.Complete();
     }
@@ -78,7 +95,7 @@ public partial class PathfindingSystem : SystemBase
     #region AStar
     private static void PerformAStarPathfinding(
     int2 startChunkCoord,
-    PathfindingConfig config,
+    PathfindingConfigSingleton config,
     PathfindingRequest request,
     NativeHashMap<int2, DynamicBuffer<TileBufferElement>> combinedTileBuffers,
     ref PathfindingResult result,
@@ -104,6 +121,8 @@ public partial class PathfindingSystem : SystemBase
             resultBuffer[1] = new PathPointBufferElement { Position = globalTargetPosition };
             result.PathLength = 2;
             result.Success = true;
+            result.NextUnprocessedIndex = 0;
+            result.FinishedProcessing = false;
             return;
         }
 
@@ -166,16 +185,19 @@ public partial class PathfindingSystem : SystemBase
             NativeList<float2> smoothPath = OptimizePathLineOfSight(path, combinedTileBuffers, chunkSize);
 
             resultBuffer.ResizeUninitialized(smoothPath.Length);
-            result.PathLength = smoothPath.Length;
 
             for (int i = 0; i < smoothPath.Length; i++)
             {
                 resultBuffer[i] = new PathPointBufferElement { Position = smoothPath[i] };
             }
 
+            result.PathLength = smoothPath.Length;
+            result.Success = true;
+            result.NextUnprocessedIndex = 0;
+            result.FinishedProcessing = false;
+
             path.Dispose();
             smoothPath.Dispose();
-            result.Success = true;
         }
         else
         {

@@ -7,10 +7,30 @@ using Unity.Transforms;
 public class PlayerInputManager : MonoBehaviour
 {
     private EntityManager entityManager;
+    private EntityQueryDesc movablePlayerCharacterQueryDesc;
 
     void Start()
     {
         entityManager = World.DefaultGameObjectInjectionWorld.EntityManager;
+
+        movablePlayerCharacterQueryDesc = new EntityQueryDesc
+        {
+            // The components the entity must have:
+            All = new[]
+            {
+                ComponentType.ReadOnly<PlayableCharacter>(),
+                ComponentType.ReadOnly<PathfindingRequest>(),
+                ComponentType.ReadOnly<PathfindingResult>(),
+                ComponentType.ReadOnly<LocalTransform>(),
+                ComponentType.ReadOnly<VelocityComponent>()
+            },
+
+            // The components the entity must NOT have:
+            None = new[]
+            {
+                ComponentType.ReadOnly<PlayerSpawnTag>()
+            }
+        };
     }
 
     void Update()
@@ -34,7 +54,7 @@ public class PlayerInputManager : MonoBehaviour
             if (Physics.Raycast(ray, out RaycastHit hit))
             {
                 Vector3 targetPosition = hit.point;                
-                //IssuePathfindingRequest(new float2(targetPosition.x, targetPosition.z));
+                IssuePathfindingRequest(new float2(targetPosition.x, targetPosition.z));
             }
 
             return;
@@ -43,13 +63,14 @@ public class PlayerInputManager : MonoBehaviour
 
     private void IssuePathfindingRequest(float2 targetPosition)
     {
-        Debug.Log($"PlayerInputManager IssuePathfindingRequest to {targetPosition}");
+        //Debug.Log($"PlayerInputManager IssuePathfindingRequest to {targetPosition}");
 
-        EntityQuery query = entityManager.CreateEntityQuery(typeof(PlayableCharacter), typeof(PathfindingRequest), typeof(LocalTransform));
-        NativeArray<Entity> entities = query.ToEntityArray(Allocator.Temp);
+        EntityQuery movablePlayerCharacterQuery = entityManager.CreateEntityQuery(movablePlayerCharacterQueryDesc);
+        NativeArray<Entity> entities = movablePlayerCharacterQuery.ToEntityArray(Allocator.Temp);
 
         foreach (Entity entity in entities)
         {
+            Debug.Log("Adding pathfinding request for entity.");
             LocalTransform position = entityManager.GetComponentData<LocalTransform>(entity);
             PathfindingRequest request = entityManager.GetComponentData<PathfindingRequest>(entity);
             
@@ -58,9 +79,9 @@ public class PlayerInputManager : MonoBehaviour
             entityManager.SetComponentData(entity, request);
 
             // Add the PathfindingActiveTag to enable processing
-            if (!entityManager.HasComponent<PathfindingActiveTag>(entity))
+            if (!entityManager.HasComponent<PathfindingRequestActiveTag>(entity))
             {
-                entityManager.AddComponent<PathfindingActiveTag>(entity);
+                entityManager.AddComponent<PathfindingRequestActiveTag>(entity);
             }
         }
 

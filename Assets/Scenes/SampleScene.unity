@@ -846,9 +846,9 @@ MonoBehaviour:
   offset: 10
   rotationSpeed: 60
   rotationSmoothTime: 0.2
-  zoomSpeed: 5
+  zoomSpeed: 20
   minDistance: 5
-  maxDistance: 20
+  maxDistance: 200
   zoomSmoothTime: 0.2
 --- !u!4 &1757018035
 Transform:

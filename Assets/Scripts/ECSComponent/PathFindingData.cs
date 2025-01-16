@@ -16,9 +16,9 @@ using Unity.Mathematics;
  */
 //tags active pathfinding requests
 //TODO: Consider switching to bool
-public struct PathfindingActiveTag : IComponentData { }
+public struct PathfindingRequestActiveTag : IComponentData { }
 
-public struct PathfindingConfig : IComponentData
+public struct PathfindingConfigSingleton : IComponentData
 {
     public int ChunkSize;
 }
@@ -41,4 +41,6 @@ public struct PathfindingResult : IComponentData
 {
     public int PathLength;
     public bool Success;
+    public int NextUnprocessedIndex;
+    public bool FinishedProcessing;
 }

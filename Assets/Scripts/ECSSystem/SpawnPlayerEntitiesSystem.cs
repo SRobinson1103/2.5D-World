@@ -5,40 +5,47 @@ using Unity.Burst;
 using Unity.Collections;
 
 [BurstCompile]
-[UpdateInGroup(typeof(PresentationSystemGroup))]
+[UpdateInGroup(typeof(InitializationSystemGroup))]
 public partial struct SpawnerSystem : ISystem
 {
     public void OnCreate(ref SystemState state)
     {
+        state.RequireForUpdate(state.GetEntityQuery(typeof(PlayerSpawner)));
         state.RequireForUpdate(state.GetEntityQuery(typeof(PlayerSpawnTag)));
     }
 
     public void OnUpdate(ref SystemState state)
     {
-        UnityEngine.Debug.Log("SpawnerSystem onupdate");
+        if (!SystemAPI.HasSingleton<PlayerSpawner>())
+            return;
+
+        PlayerSpawner spawner = SystemAPI.GetSingleton<PlayerSpawner>();
+
         EntityCommandBuffer ecb = new EntityCommandBuffer(Allocator.Temp);
 
-        // For each entity that has a Spawner component...
-        foreach (var (spawner, entity) in SystemAPI.Query<RefRW<PlayerSpawner>>().WithEntityAccess())
+        // For each entity that has a PlayerSpawnTag, spawn a prefab
+        // reading its Position from the PlayerSpawnTag
+        foreach (var (spawnTag, spawnTagEntity) in SystemAPI.Query<RefRO<PlayerSpawnTag>>().WithEntityAccess())
         {
-            // If Prefab is valid (not Entity.Null), instantiate
-            if (spawner.ValueRO.Prefab != Entity.Null)
-            {
-                Entity instance = ecb.Instantiate(spawner.ValueRO.Prefab);
+            Entity instance = ecb.Instantiate(spawner.Prefab);
 
-                ecb.AddComponent<PlayableCharacter>(instance);
-                ecb.AddComponent<PathfindingRequest>(instance);
-                ecb.AddComponent<VelocityComponent>(instance);
+            ecb.AddComponent<PlayableCharacter>(instance);
+            ecb.AddComponent<PathfindingRequest>(instance);
+            ecb.AddComponent<PathfindingResult>(instance);
+            ecb.AddComponent<VelocityComponent>(instance);
+            ecb.AddBuffer<PathPointBufferElement>(instance);
 
-                ecb.SetComponent(instance, new PlayableCharacter { /* Initialize fields if needed */ });
-                ecb.SetComponent(instance, new PathfindingRequest { /* Initialize fields if needed */ });
-                ecb.SetComponent(instance, new VelocityComponent { Speed = 1.0f, IsMoving = false });
-                ecb.SetComponent(instance, LocalTransform.FromPositionRotationScale(float3.zero, quaternion.identity, 1f));
+            float characterSpeed = 1.0f;
+            //ecb.SetComponent(instance, new PathfindingRequest());
 
-                ecb.RemoveComponent<PlayerSpawnTag>(instance);
-            }
+            ecb.SetComponent(instance, new PlayableCharacter { Speed = characterSpeed });
+            ecb.SetComponent(instance, new VelocityComponent { Speed = characterSpeed });
+            ecb.SetComponent(instance, LocalTransform.FromPositionRotationScale(spawnTag.ValueRO.Position, quaternion.identity, 1f));
+
+            ecb.DestroyEntity(spawnTagEntity);
         }
 
+        // Playback the ECB
         ecb.Playback(state.EntityManager);
         ecb.Dispose();
     }

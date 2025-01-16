@@ -43,7 +43,6 @@ public class PathfindingTest : MonoBehaviour
         // Manually create an entity
         characterEntity = entityManager.CreateEntity(
             typeof(LocalTransform),
-            typeof(PathfindingConfig),
             typeof(PathfindingRequest),
             typeof(PathfindingResult)
         );
@@ -61,11 +60,11 @@ public class PathfindingTest : MonoBehaviour
             GlobalStartPosition = float2.zero,
             GlobalTargetPosition = new float2 { x = 11, y = 12}
         });
-        //set chunk size
-        entityManager.SetComponentData(characterEntity, new PathfindingConfig
-        {
-            ChunkSize = chunkingSystem.chunkSize
-        });
+        ////set chunk size
+        //entityManager.SetComponentData(characterEntity, new PathfindingConfigSingleton
+        //{
+        //    ChunkSize = chunkingSystem.chunkSize
+        //});
         entityManager.AddBuffer<PathPointBufferElement>(characterEntity); // Add a DynamicBuffer to the entity
 
     }
@@ -114,7 +113,7 @@ public class PathfindingTest : MonoBehaviour
         }
 
         //remove active request tag to prevent duplicate requests
-        entityManager.RemoveComponent<PathfindingActiveTag>(characterEntity);
+        entityManager.RemoveComponent<PathfindingRequestActiveTag>(characterEntity);
         pathRequestedThisFrame = false;
     }
 
@@ -142,9 +141,9 @@ public class PathfindingTest : MonoBehaviour
         });
 
         // Add the PathfindingActiveTag to enable processing
-        if (!entityManager.HasComponent<PathfindingActiveTag>(characterEntity))
+        if (!entityManager.HasComponent<PathfindingRequestActiveTag>(characterEntity))
         {
-            entityManager.AddComponent<PathfindingActiveTag>(characterEntity);
+            entityManager.AddComponent<PathfindingRequestActiveTag>(characterEntity);
         }
     }
 
