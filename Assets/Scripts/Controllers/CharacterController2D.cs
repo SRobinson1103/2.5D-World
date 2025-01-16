@@ -1,6 +1,6 @@
 using UnityEngine;
 
-public class ClickToMove : MonoBehaviour
+public class CharacterController2D : MonoBehaviour
 {
     public float moveSpeed = 5f;       // Movement speed
     public LayerMask terrainLayer;    // Layer for the terrain to interact with
@@ -22,7 +22,7 @@ public class ClickToMove : MonoBehaviour
         if (terrainLayer.value == 0)
         {
             terrainLayer = LayerMask.GetMask("Terrain");
-            Debug.Log("LayerMask is empty. Assigned with default value: " + terrainLayer.value);
+            //Debug.Log("LayerMask is empty. Assigned with default value: " + terrainLayer.value);
         }
     }
 
